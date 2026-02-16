@@ -6,40 +6,32 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>ToF シリアルビューア（相対時間軸 & 任意Y軸）</title>
 
-  <!-- Chart.js（正しい script タグ / v4固定） -->
-  https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <!-- ★ Chart.js（v4固定 / 正しいscriptタグ） -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 
   <style>
     :root { color-scheme: light dark; }
     html, body { height: 100%; }
-    body {
-      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP", sans-serif;
-      margin: 24px;
-    }
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP", sans-serif; margin: 24px; }
     h1 { font-size: 1.25rem; margin-bottom: 0.5rem; }
     .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 12px; }
     .row label { font-size: 0.9rem; }
     button { padding: 8px 14px; font-size: 0.95rem; }
     input[type="number"] { padding: 6px; font-size: 0.95rem; }
-    .stats {
-      display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 8px; margin-top: 10px;
-    }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-top: 10px; }
     .card { border: 1px solid #9993; border-radius: 8px; padding: 10px; }
     .val { font-size: 1.3rem; font-weight: 600; }
-    #log {
-      height: 160px; overflow: auto; white-space: pre;
-      background: #0000000a; padding: 8px; border-radius: 8px; border: 1px solid #9993;
-    }
+    #log { height: 160px; overflow: auto; white-space: pre; background: #0000000a; padding: 8px; border-radius: 8px; border: 1px solid #9993; }
     #chart { max-height: 380px; }
     .ok { color: #1a7f37; }
     .warn { color: #b44; }
     .muted { opacity: 0.7; }
     .section-title { margin-top: 16px; margin-bottom: 6px; }
+    .badge { font-size: .85rem; padding: 2px 6px; border-radius: 8px; border: 1px solid #9993; }
   </style>
 </head>
 <body>
-  <h1>ToF シリアルビューア（相対時間軸 & 任意Y軸）</h1>
+  <h1>ToF シリアルビューア（相対時間軸 & 任意Y軸） <span id="supportBadge" class="badge"></span></h1>
 
   <!-- 操作パネル -->
   <div class="row" aria-label="操作パネル">
@@ -105,9 +97,19 @@
     (() => {
       'use strict';
 
-      // ---------------------------
-      // ユーティリティ（行単位に分割）
-      // ---------------------------
+      // ---- サポート表示 ----
+      const supportBadge = document.getElementById('supportBadge');
+      if ('serial' in navigator) {
+        supportBadge.textContent = 'Web Serial 対応ブラウザ ✓';
+        supportBadge.style.borderColor = '#1a7f37';
+        supportBadge.style.color = '#1a7f37';
+      } else {
+        supportBadge.textContent = 'このブラウザはWeb Serial非対応';
+        supportBadge.style.borderColor = '#b44';
+        supportBadge.style.color = '#b44';
+      }
+
+      // ---- 行ごとに分割するトランスフォーマ ----
       class LineBreakTransformer {
         constructor() { this.container = ""; }
         transform(chunk, controller) {
@@ -121,9 +123,7 @@
         }
       }
 
-      // ---------------------------
-      // 要素
-      // ---------------------------
+      // ---- DOM要素 ----
       const els = {
         connectBtn: document.getElementById('connectBtn'),
         disconnectBtn: document.getElementById('disconnectBtn'),
@@ -131,13 +131,11 @@
         autoScrollChk: document.getElementById('autoScroll'),
         saveCsvBtn: document.getElementById('saveCsvBtn'),
         clearBtn: document.getElementById('clearBtn'),
-
         timeWindowSecInput: document.getElementById('timeWindowSec'),
         yMinInput: document.getElementById('yMin'),
         yMaxInput: document.getElementById('yMax'),
         applyAxisBtn: document.getElementById('applyAxisBtn'),
         resetAxisBtn: document.getElementById('resetAxisBtn'),
-
         statusEl: document.getElementById('status'),
         portInfoEl: document.getElementById('portInfo'),
         latestValEl: document.getElementById('latestVal'),
@@ -149,44 +147,31 @@
         chartCanvas: document.getElementById('chart'),
       };
 
-      // ---------------------------
-      // 状態
-      // ---------------------------
+      // ---- 状態 ----
       const state = {
         port: null,
         reader: null,
         sampleCount: 0,
         timeoutCount: 0,
         prevMillisForPeriod: null,
-
-        // 受信データ（絶対ms & 距離）
         timesMs: [],
         dists: [],
         lastMillis: null,
-
-        // 表示ウィンドウ（相対時間の幅）
         windowMs: 10_000, // 10秒
-
-        // CSV
         receiveCsv: [],
       };
 
-      // ---------------------------
-      // ログ表示
-      // ---------------------------
+      // ---- ログ ----
       function appendLog(line) {
-        els.logEl.textContent += line + "\n";
+        els.logEl.textContent += line + "\\n";
         if (els.logEl.textContent.length > 200000) {
           els.logEl.textContent = els.logEl.textContent.slice(-200000);
         }
         if (els.autoScrollChk.checked) els.logEl.scrollTop = els.logEl.scrollHeight;
       }
 
-      // ---------------------------
-      // 解析
-      // ---------------------------
+      // ---- 1行のパース ----
       function parseLine(line) {
-        // "<millis>,<distance>" or "<millis>,<distance> TIMEOUT"
         const commaIdx = line.indexOf(',');
         if (commaIdx < 0) return null;
 
@@ -208,13 +193,10 @@
         return { millis, distance, isTimeout };
       }
 
-      // ---------------------------
-      // Chart.js 初期化
-      // ---------------------------
+      // ---- グラフ ----
       const chart = new Chart(els.chartCanvas, {
         type: 'line',
         data: {
-          // 相対時間表示のため {x,y} を直接使う
           datasets: [{
             label: '距離 [mm]',
             data: [],
@@ -228,33 +210,29 @@
           animation: false,
           responsive: true,
           maintainAspectRatio: false,
-          parsing: false,
+          parsing: false, // {x,y}をそのまま使用
           scales: {
             x: {
               type: 'linear',
               title: { display: true, text: '相対時間 [s]' },
-              min: -state.windowMs,  // 内部はms、表示は秒
+              min: -state.windowMs,
               max: 0,
               ticks: { callback: (v) => (v/1000).toFixed(1) },
             },
             y: {
               title: { display: true, text: '距離 [mm]' },
-              // min/max は applyAxis() で設定
             }
           },
           plugins: { legend: { display: true } }
         }
       });
 
-      // ---------------------------
-      // データ更新 & グラフ更新
-      // ---------------------------
       function pushData(millis, distance) {
         state.timesMs.push(millis);
         state.dists.push(distance);
         state.lastMillis = millis;
 
-        // 古いデータを間引き（1.5倍の余裕）
+        // 古いデータを間引き
         const cutoff = millis - state.windowMs * 1.5;
         while (state.timesMs.length && state.timesMs[0] < cutoff) {
           state.timesMs.shift();
@@ -275,9 +253,6 @@
         chart.update('none');
       }
 
-      // ---------------------------
-      // UI更新
-      // ---------------------------
       function updateStats({ millis, distance, isTimeout }) {
         els.latestValEl.textContent = (distance ?? "-");
         els.latestTimeEl.textContent = (millis ?? "-");
@@ -302,11 +277,8 @@
         els.statusEl.textContent = state.port ? '接続中' : '未接続';
       }
 
-      // ---------------------------
-      // 軸設定
-      // ---------------------------
+      // ---- 軸設定 ----
       function applyAxis() {
-        // 時間窓（秒）→ ms
         const t = Number(els.timeWindowSecInput.value);
         if (Number.isFinite(t) && t > 0) {
           state.windowMs = Math.floor(t * 1000);
@@ -314,23 +286,18 @@
           alert('時間ウィンドウは正の数値（秒）を入力してください');
           return;
         }
-
-        // Y軸 min/max
         const yminStr = els.yMinInput.value.trim();
         const ymaxStr = els.yMaxInput.value.trim();
         const ymin = yminStr === '' ? undefined : Number(yminStr);
         const ymax = ymaxStr === '' ? undefined : Number(ymaxStr);
-
         if (ymin !== undefined && ymax !== undefined && ymin >= ymax) {
           alert('縦軸の min は max より小さくしてください');
           return;
         }
-
         chart.options.scales.x.min = -state.windowMs;
         chart.options.scales.x.max = 0;
         chart.options.scales.y.min = ymin;
         chart.options.scales.y.max = ymax;
-
         refreshChart();
       }
 
@@ -338,19 +305,15 @@
         els.timeWindowSecInput.value = '10';
         els.yMinInput.value = '';
         els.yMaxInput.value = '';
-
         state.windowMs = 10_000;
         chart.options.scales.x.min = -state.windowMs;
         chart.options.scales.x.max = 0;
         chart.options.scales.y.min = undefined;
         chart.options.scales.y.max = undefined;
-
         refreshChart();
       }
 
-      // ---------------------------
-      // シリアル
-      // ---------------------------
+      // ---- シリアル ----
       async function readLoop() {
         if (!state.port?.readable) return;
 
@@ -378,11 +341,7 @@
             if (!parsed) continue;
 
             const { millis, distance, isTimeout } = parsed;
-
-            // CSV
             state.receiveCsv.push([millis, distance, isTimeout ? 1 : 0]);
-
-            // データ & UI
             pushData(millis, distance);
             updateStats({ millis, distance, isTimeout });
             refreshChart();
@@ -411,7 +370,6 @@
           els.disconnectBtn.disabled = false;
           els.saveCsvBtn.disabled = false;
 
-          // ポート情報
           try {
             const info = state.port.getInfo?.();
             if (info && (info.usbVendorId || info.usbProductId)) {
@@ -454,15 +412,9 @@
             try { await state.reader.releaseLock(); } catch {}
             state.reader = null;
           }
-          if (state.port?.readable) {
-            try { await state.port.readable.cancel(); } catch {}
-          }
-          if (state.port?.writable) {
-            try { await state.port.writable.abort?.(); } catch {}
-          }
-          if (state.port) {
-            try { await state.port.close(); } catch {}
-          }
+          if (state.port?.readable) { try { await state.port.readable.cancel(); } catch {} }
+          if (state.port?.writable) { try { await state.port.writable.abort?.(); } catch {} }
+          if (state.port) { try { await state.port.close(); } catch {} }
         } finally {
           state.port = null;
           els.connectBtn.disabled = false;
@@ -474,18 +426,13 @@
       }
 
       function saveCsv() {
-        if (state.receiveCsv.length <= 1) {
-          alert('保存するデータがありません。');
-          return;
-        }
-        const lines = state.receiveCsv.map(row => row.join(',')).join('\n');
+        if (state.receiveCsv.length <= 1) { alert('保存するデータがありません。'); return; }
+        const lines = state.receiveCsv.map(row => row.join(',')).join('\\n');
         const blob = new Blob([lines], { type: 'text/csv;charset=utf-8' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         const dateStr = new Date().toISOString().replace(/[:.]/g, '-');
-        a.href = url;
-        a.download = `tof_serial_${dateStr}.csv`;
-        a.click();
+        a.href = url; a.download = `tof_serial_${dateStr}.csv`; a.click();
         URL.revokeObjectURL(url);
       }
 
@@ -496,23 +443,23 @@
         state.timeoutCount = 0; els.timeoutCountEl.textContent = '0';
         state.sampleCount = 0; els.sampleCountEl.textContent = '0';
         els.samplePeriodEl.textContent = '-';
-
-        state.timesMs.length = 0;
-        state.dists.length = 0;
-        state.lastMillis = null;
-        state.prevMillisForPeriod = null;
-
-        chart.data.datasets[0].data = [];
-        chart.update();
+        state.timesMs.length = 0; state.dists.length = 0; state.lastMillis = null; state.prevMillisForPeriod = null;
+        chart.data.datasets[0].data = []; chart.update();
       }
 
-      // ---------------------------
-      // イベント・初期化
-      // ---------------------------
+      // イベント
       navigator.serial?.addEventListener('connect', () => appendLog('[デバイスが接続されました]'));
       navigator.serial?.addEventListener('disconnect', () => appendLog('[デバイスが取り外されました]'));
-
       els.connectBtn.addEventListener('click', connect);
       els.disconnectBtn.addEventListener('click', () => disconnect(false));
       els.saveCsvBtn.addEventListener('click', saveCsv);
       els.clearBtn.addEventListener('click', clearView);
+      els.applyAxisBtn.addEventListener('click', applyAxis);
+      els.resetAxisBtn.addEventListener('click', resetAxis);
+
+      // 初期適用
+      applyAxis();
+    })();
+  </script>
+</body>
+</html>
