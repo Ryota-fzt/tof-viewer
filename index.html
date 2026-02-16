@@ -113,8 +113,16 @@
       class LineBreakTransformer {
         constructor() { this.container = ""; }
         transform(chunk, controller) {
-          this.container += chunk;
-          const lines = this.container.split(/\r?\n/);
+          // 1) まず「文字としての \r\n / \r / \n」を本物に直す
+          //    "\\r\\n" → "\n"、"\\r" → "\n"、"\\n" → "\n"
+          const normalized = chunk
+            .replace(/\\r\\n/g, '\n')
+            .replace(/\\r/g, '\n')
+            .replace(/\\n/g, '\n');
+      
+          // 2) コンテナに追加して、\r?\n（実際の改行コード）で分割
+          this.container += normalized;
+          const lines = this.container.split(/\r?\n|\r/);
           this.container = lines.pop();
           for (const line of lines) controller.enqueue(line);
         }
@@ -162,12 +170,18 @@
       };
 
       // ---- ログ ----
+     
       function appendLog(line) {
-        els.logEl.textContent += line + "\\n";
-        if (els.logEl.textContent.length > 200000) {
-          els.logEl.textContent = els.logEl.textContent.slice(-200000);
+        // 文字の \r\n / \r / \n を実際の改行へ
+        const normalized = line
+          .replace(/\\r\\n/g, '\n')
+          .replace(/\\r/g, '\n')
+          .replace(/\\n/g, '\n');
+        logEl.textContent += normalized + '\n';
+        if (logEl.textContent.length > 200000) {
+          logEl.textContent = logEl.textContent.slice(-200000);
         }
-        if (els.autoScrollChk.checked) els.logEl.scrollTop = els.logEl.scrollHeight;
+        if (autoScrollChk.checked) logEl.scrollTop = logEl.scrollHeight;
       }
 
       // ---- 1行のパース ----
@@ -335,6 +349,12 @@
             if (done) break;
             if (typeof value !== 'string') continue;
 
+/ 直近10文字のコードポイントを出す（\n が 10、\r が 13、\ が 92、n が 110）
+const tail = value.slice(-10);
+const codes = Array.from(tail).map(c => c.charCodeAt(0));
+console.debug('TAIL:', JSON.stringify(tail), codes);
+
+            
             appendLog(value);
 
             const parsed = parseLine(value);
@@ -463,3 +483,4 @@
   </script>
 </body>
 </html>
+
