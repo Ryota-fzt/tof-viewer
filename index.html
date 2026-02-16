@@ -131,7 +131,6 @@
     });
 
     function appendLog(line) {
-      const maxLen = 5000; // keep log manageable
       logEl.textContent += line + "\n";
       if (logEl.textContent.length > 200000) {
         logEl.textContent = logEl.textContent.slice(-200000);
@@ -153,8 +152,8 @@
       }
       if (millis != null) lastMillis = millis;
 
-      // Update status tint
       statusEl.className = isTimeout ? 'warn' : 'ok';
+      statusEl.textContent = port ? '接続中' : '未接続';
     }
 
     function addToChart(millis, distance) {
@@ -172,8 +171,6 @@
 
     function parseLine(line) {
       // Expected: "<millis>,<distance>" or "<millis>,<distance> TIMEOUT"
-      // Example: 123456,789
-      //          123460,0 TIMEOUT
       const commaIdx = line.indexOf(',');
       if (commaIdx < 0) return null;
 
@@ -225,13 +222,9 @@
           sampleCount++;
           if (isTimeout) timeoutCount++;
 
-          // Save to CSV buffer
           receiveCsv.push([millis, distance, isTimeout ? 1 : 0]);
 
-          // Update UI
           updateStats({ millis, distance, isTimeout });
-
-          // Plot (skip plotting TIMEOUT data if距離が負値なら除外等しても良い)
           addToChart(millis, distance);
         }
       } catch (err) {
@@ -249,10 +242,6 @@
         return;
       }
       try {
-        // Optional: フィルタが必要なら {usbVendorId, usbProductId} を指定
-        // const filters = [{ usbVendorId: 0x10C4 }, { usbVendorId: 0x1A86 }]; // 例: CP210x, CH34x
-        // const p = await navigator.serial.requestPort({ filters });
-
         const p = await navigator.serial.requestPort(); // ユーザーが選択
         const baudRate = Number.parseInt(baudSel.value, 10);
         await p.open({ baudRate, dataBits: 8, stopBits: 1, parity: 'none', flowControl: 'none' });
@@ -262,7 +251,6 @@
         disconnectBtn.disabled = false;
         saveCsvBtn.disabled = false;
 
-        // Port info (USB only; may be undefined on CDC ACM)
         let infoText = '-';
         try {
           const info = port.getInfo?.();
@@ -279,7 +267,6 @@
         statusEl.textContent = '接続中';
         statusEl.className = 'ok';
 
-        // Reset counters and graph
         timeoutCount = 0; sampleCount = 0; lastMillis = null;
         receiveCsv = [["millis","distance","timeout"]];
         chart.data.labels.length = 0;
@@ -351,7 +338,6 @@
       chart.update();
     }
 
-    // Auto handle cable plug/unplug
     navigator.serial?.addEventListener('connect', (event) => {
       appendLog('[デバイスが接続されました]');
     });
@@ -360,7 +346,6 @@
       await disconnect(true);
     });
 
-    // Bind UI
     connectBtn.addEventListener('click', connect);
     disconnectBtn.addEventListener('click', () => disconnect(false));
     saveCsvBtn.addEventListener('click', saveCsv);
