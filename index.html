@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>ToF シリアルビューア (Web Serial)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Chart.js for simple line chart -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP", sans-serif; margin: 24px; }
+    h1 { font-size: 1.2rem; margin-bottom: 0.5rem; }
+    .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 12px; }
+    .row label { font-size: 0.9rem; }
+    button { padding: 8px 14px; font-size: 0.95rem; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-top: 10px; }
+    .card { border: 1px solid #9993; border-radius: 8px; padding: 10px; }
+    .val { font-size: 1.4rem; font-weight: 600; }
+    #log { height: 160px; overflow: auto; white-space: pre; background: #0000000a; padding: 8px; border-radius: 8px; border: 1px solid #9993; }
+    canvas { max-height: 360px; }
+    .ok { color: #1a7f37; }
+    .warn { color: #b44; }
+    .muted { opacity: 0.7; }
+  </style>
+</head>
+<body>
+  <h1>ToF シリアルビューア（Chrome/Edge × Web Serial）</h1>
+
+  <div class="row">
+    <button id="connectBtn">接続</button>
+    <button id="disconnectBtn" disabled>切断</button>
+
+    <label>ボーレート:
+      <select id="baud">
+        <option value="115200" selected>115200</option>
+        <option value="57600">57600</option>
+        <option value="38400">38400</option>
+        <option value="9600">9600</option>
+      </select>
+    </label>
+
+    <label><input type="checkbox" id="autoScroll" checked /> ログ自動スクロール</label>
+    <button id="saveCsvBtn" disabled>CSV保存</button>
+    <button id="clearBtn">表示クリア</button>
+  </div>
+
+  <div class="stats">
+    <div class="card"><div class="muted">接続状態</div><div id="status" class="val">未接続</div></div>
+    <div class="card"><div class="muted">ポート情報</div><div id="portInfo" class="val">-</div></div>
+    <div class="card"><div class="muted">最新距離 [mm]</div><div id="latestVal" class="val">-</div></div>
+    <div class="card"><div class="muted">最新時刻 [ms]</div><div id="latestTime" class="val">-</div></div>
+    <div class="card"><div class="muted">TIMEOUT 回数</div><div id="timeoutCount" class="val">0</div></div>
+    <div class="card"><div class="muted">サンプル数</div><div id="sampleCount" class="val">0</div></div>
+    <div class="card"><div class="muted">推定サンプリング周期</div><div id="samplePeriod" class="val">-</div></div>
+  </div>
+
+  <h2>グラフ</h2>
+  <canvas id="chart"></canvas>
+
+  <h2>受信ログ</h2>
+  <div id="log"></div>
+
+  <script>
+    // --- Utility: line-by-line transformer for streams ---
+    class LineBreakTransformer {
+      constructor() { this.container = ""; }
+      transform(chunk, controller) {
+        this.container += chunk;
+        const lines = this.container.split(/\r?\n/);
+        this.container = lines.pop();
+        for (const line of lines) controller.enqueue(line);
+      }
+      flush(controller) {
+        if (this.container) controller.enqueue(this.container);
+      }
+    }
+
+    // --- UI elements ---
+    const connectBtn = document.getElementById('connectBtn');
+    const disconnectBtn = document.getElementById('disconnectBtn');
+    const saveCsvBtn = document.getElementById('saveCsvBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const baudSel = document.getElementById('baud');
+    const autoScrollChk = document.getElementById('autoScroll');
+
+    const statusEl = document.getElementById('status');
+    const portInfoEl = document.getElementById('portInfo');
+    const latestValEl = document.getElementById('latestVal');
+    const latestTimeEl = document.getElementById('latestTime');
+    const timeoutCountEl = document.getElementById('timeoutCount');
+    const sampleCountEl = document.getElementById('sampleCount');
+    const samplePeriodEl = document.getElementById('samplePeriod');
+    const logEl = document.getElementById('log');
+
+    // --- State ---
+    let port = null;
+    let reader = null;
+    let reading = false;
+    let receiveCsv = [];     // [["millis","distance","timeout"], ...]
+    let timeoutCount = 0;
+    let sampleCount = 0;
+    let lastMillis = null;
+
+    // --- Chart setup ---
+    const ctx = document.getElementById('chart');
+    const chart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [{
+          label: '距離 [mm]',
+          data: [],
+          borderColor: '#1f77b4',
+          backgroundColor: 'rgba(31,119,180,0.1)',
+          pointRadius: 0,
+          tension: 0.15,
+        }]
+      },
+      options: {
+        animation: false,
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+          x: { title: { display: true, text: '時間 [ms]' } },
+          y: { title: { display: true, text: '距離 [mm]' } }
+        },
+        plugins: {
+          legend: { display: true }
+        }
+      }
+    });
+
+    function appendLog(line) {
+      const maxLen = 5000; // keep log manageable
+      logEl.textContent += line + "\n";
+      if (logEl.textContent.length > 200000) {
+        logEl.textContent = logEl.textContent.slice(-200000);
+      }
+      if (autoScrollChk.checked) logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function updateStats({ millis, distance, isTimeout }) {
+      latestValEl.textContent = (distance ?? "-");
+      latestTimeEl.textContent = (millis ?? "-");
+      sampleCountEl.textContent = sampleCount.toString();
+      timeoutCountEl.textContent = timeoutCount.toString();
+
+      if (lastMillis != null && millis != null) {
+        const period = millis - lastMillis; // ms
+        if (period > 0 && period < 100000) {
+          samplePeriodEl.textContent = `${period} ms (${(1000/period).toFixed(2)} Hz)`;
+        }
+      }
+      if (millis != null) lastMillis = millis;
+
+      // Update status tint
+      statusEl.className = isTimeout ? 'warn' : 'ok';
+    }
+
+    function addToChart(millis, distance) {
+      const MAX_POINTS = 2000; // limit for performance
+      const labels = chart.data.labels;
+      const data = chart.data.datasets[0].data;
+      labels.push(millis);
+      data.push(distance);
+      if (labels.length > MAX_POINTS) {
+        labels.splice(0, labels.length - MAX_POINTS);
+        data.splice(0, data.length - MAX_POINTS);
+      }
+      chart.update('none'); // no animation
+    }
+
+    function parseLine(line) {
+      // Expected: "<millis>,<distance>" or "<millis>,<distance> TIMEOUT"
+      // Example: 123456,789
+      //          123460,0 TIMEOUT
+      const commaIdx = line.indexOf(',');
+      if (commaIdx < 0) return null;
+
+      const msStr = line.slice(0, commaIdx).trim();
+      const rest = line.slice(commaIdx + 1).trim();
+
+      let isTimeout = false;
+      let distStr = rest;
+      const timeoutIdx = rest.indexOf('TIMEOUT');
+      if (timeoutIdx >= 0) {
+        isTimeout = true;
+        distStr = rest.slice(0, timeoutIdx).trim();
+      }
+
+      const millis = Number.parseInt(msStr, 10);
+      const distance = Number.parseInt(distStr, 10);
+      if (!Number.isFinite(millis) || !Number.isFinite(distance)) return null;
+
+      return { millis, distance, isTimeout };
+    }
+
+    async function readLoop() {
+      if (!port?.readable) return;
+
+      const textDecoder = new TextDecoderStream();
+      const lineStream = port.readable
+        .pipeThrough(textDecoder)
+        .pipeThrough(new TransformStream({
+          start() { this.lbt = new LineBreakTransformer(); },
+          transform(chunk, controller) { this.lbt.transform(chunk, controller); },
+          flush(controller) { this.lbt.flush(controller); }
+        }));
+
+      reader = lineStream.getReader();
+      reading = true;
+
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (typeof value !== 'string') continue;
+
+          appendLog(value);
+
+          const parsed = parseLine(value);
+          if (!parsed) continue;
+
+          const { millis, distance, isTimeout } = parsed;
+          sampleCount++;
+          if (isTimeout) timeoutCount++;
+
+          // Save to CSV buffer
+          receiveCsv.push([millis, distance, isTimeout ? 1 : 0]);
+
+          // Update UI
+          updateStats({ millis, distance, isTimeout });
+
+          // Plot (skip plotting TIMEOUT data if距離が負値なら除外等しても良い)
+          addToChart(millis, distance);
+        }
+      } catch (err) {
+        console.error(err);
+        appendLog(`[エラー] ${String(err)}`);
+      } finally {
+        reading = false;
+        try { await reader.releaseLock(); } catch {}
+      }
+    }
+
+    async function connect() {
+      if (!('serial' in navigator)) {
+        alert('このブラウザは Web Serial に対応していません。Chrome または Edge の最新版をお使いください。');
+        return;
+      }
+      try {
+        // Optional: フィルタが必要なら {usbVendorId, usbProductId} を指定
+        // const filters = [{ usbVendorId: 0x10C4 }, { usbVendorId: 0x1A86 }]; // 例: CP210x, CH34x
+        // const p = await navigator.serial.requestPort({ filters });
+
+        const p = await navigator.serial.requestPort(); // ユーザーが選択
+        const baudRate = Number.parseInt(baudSel.value, 10);
+        await p.open({ baudRate, dataBits: 8, stopBits: 1, parity: 'none', flowControl: 'none' });
+
+        port = p;
+        connectBtn.disabled = true;
+        disconnectBtn.disabled = false;
+        saveCsvBtn.disabled = false;
+
+        // Port info (USB only; may be undefined on CDC ACM)
+        let infoText = '-';
+        try {
+          const info = port.getInfo?.();
+          if (info && (info.usbVendorId || info.usbProductId)) {
+            const v = info.usbVendorId ? '0x' + info.usbVendorId.toString(16) : '?';
+            const d = info.usbProductId ? '0x' + info.usbProductId.toString(16) : '?';
+            infoText = `VID ${v} / PID ${d}`;
+          } else {
+            infoText = 'USB CDC / 不明';
+          }
+        } catch {}
+        portInfoEl.textContent = infoText;
+
+        statusEl.textContent = '接続中';
+        statusEl.className = 'ok';
+
+        // Reset counters and graph
+        timeoutCount = 0; sampleCount = 0; lastMillis = null;
+        receiveCsv = [["millis","distance","timeout"]];
+        chart.data.labels.length = 0;
+        chart.data.datasets[0].data.length = 0;
+        chart.update();
+
+        await readLoop();
+
+      } catch (err) {
+        console.error(err);
+        alert('接続に失敗しました: ' + String(err));
+        await disconnect(true);
+      }
+    }
+
+    async function disconnect(silent = false) {
+      disconnectBtn.disabled = true;
+      try {
+        if (reader) {
+          try { await reader.cancel(); } catch {}
+          try { await reader.releaseLock(); } catch {}
+        }
+        if (port?.readable) {
+          try { await port.readable.cancel(); } catch {}
+        }
+        if (port?.writable) {
+          try { await port.writable.abort?.(); } catch {}
+        }
+        if (port) {
+          try { await port.close(); } catch {}
+        }
+      } finally {
+        port = null;
+        reader = null;
+        reading = false;
+        connectBtn.disabled = false;
+        saveCsvBtn.disabled = receiveCsv.length <= 1;
+        statusEl.textContent = '未接続';
+        statusEl.className = '';
+        if (!silent) appendLog('[切断]');
+      }
+    }
+
+    function saveCsv() {
+      if (receiveCsv.length <= 1) {
+        alert('保存するデータがありません。');
+        return;
+      }
+      const lines = receiveCsv.map(row => row.join(',')).join('\n');
+      const blob = new Blob([lines], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const dateStr = new Date().toISOString().replace(/[:.]/g, '-');
+      a.href = url;
+      a.download = `tof_serial_${dateStr}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function clearView() {
+      logEl.textContent = '';
+      latestValEl.textContent = '-';
+      latestTimeEl.textContent = '-';
+      timeoutCount = 0; timeoutCountEl.textContent = '0';
+      sampleCount = 0; sampleCountEl.textContent = '0';
+      samplePeriodEl.textContent = '-';
+      chart.data.labels.length = 0;
+      chart.data.datasets[0].data.length = 0;
+      chart.update();
+    }
+
+    // Auto handle cable plug/unplug
+    navigator.serial?.addEventListener('connect', (event) => {
+      appendLog('[デバイスが接続されました]');
+    });
+    navigator.serial?.addEventListener('disconnect', async (event) => {
+      appendLog('[デバイスが取り外されました]');
+      await disconnect(true);
+    });
+
+    // Bind UI
+    connectBtn.addEventListener('click', connect);
+    disconnectBtn.addEventListener('click', () => disconnect(false));
+    saveCsvBtn.addEventListener('click', saveCsv);
+    clearBtn.addEventListener('click', clearView);
+  </script>
+</body>
+</html>
