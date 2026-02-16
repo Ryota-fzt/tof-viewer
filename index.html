@@ -2,22 +2,35 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
-  <title>ToF シリアルビューア（相対時間軸 & 任意Y軸）</title>
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <!-- Chart.js (v4系) -->
-  https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <title>ToF シリアルビューア（相対時間軸 & 任意Y軸）</title>
+
+  <!-- Chart.js（正しい script タグ / v4固定） -->
+  https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
   <style>
     :root { color-scheme: light dark; }
-    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP", sans-serif; margin: 24px; }
-    h1 { font-size: 1.2rem; margin-bottom: 0.5rem; }
+    html, body { height: 100%; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP", sans-serif;
+      margin: 24px;
+    }
+    h1 { font-size: 1.25rem; margin-bottom: 0.5rem; }
     .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 12px; }
     .row label { font-size: 0.9rem; }
     button { padding: 8px 14px; font-size: 0.95rem; }
     input[type="number"] { padding: 6px; font-size: 0.95rem; }
-    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-top: 10px; }
+    .stats {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 8px; margin-top: 10px;
+    }
     .card { border: 1px solid #9993; border-radius: 8px; padding: 10px; }
-    .val { font-size: 1.4rem; font-weight: 600; }
-    #log { height: 160px; overflow: auto; white-space: pre; background: #0000000a; padding: 8px; border-radius: 8px; border: 1px solid #9993; }
+    .val { font-size: 1.3rem; font-weight: 600; }
+    #log {
+      height: 160px; overflow: auto; white-space: pre;
+      background: #0000000a; padding: 8px; border-radius: 8px; border: 1px solid #9993;
+    }
     #chart { max-height: 380px; }
     .ok { color: #1a7f37; }
     .warn { color: #b44; }
@@ -29,12 +42,12 @@
   <h1>ToF シリアルビューア（相対時間軸 & 任意Y軸）</h1>
 
   <!-- 操作パネル -->
-  <div class="row">
+  <div class="row" aria-label="操作パネル">
     <button id="connectBtn">接続</button>
     <button id="disconnectBtn" disabled>切断</button>
 
     <label>ボーレート:
-      <select id="baud">
+      <select id="baud" aria-label="ボーレート">
         <option value="115200" selected>115200</option>
         <option value="57600">57600</option>
         <option value="38400">38400</option>
@@ -49,9 +62,9 @@
 
   <!-- 軸の設定 -->
   <h2 class="section-title">軸の設定</h2>
-  <div class="row" style="gap:16px; align-items:flex-end;">
+  <div class="row" style="gap:16px; align-items:flex-end;" aria-label="軸の設定">
     <div>
-      <div class="muted">横軸：表示時間幅（相対時間・秒）</div>
+      <div class="muted">横軸：表示時間幅（相対・秒）</div>
       <label>ウィンドウ幅[s]:
         <input id="timeWindowSec" type="number" min="1" step="1" value="10" style="width:120px" />
       </label>
@@ -72,7 +85,7 @@
   </div>
 
   <!-- 統計 -->
-  <div class="stats">
+  <div class="stats" aria-label="統計情報">
     <div class="card"><div class="muted">接続状態</div><div id="status" class="val">未接続</div></div>
     <div class="card"><div class="muted">ポート情報</div><div id="portInfo" class="val">-</div></div>
     <div class="card"><div class="muted">最新距離 [mm]</div><div id="latestVal" class="val">-</div></div>
@@ -83,412 +96,423 @@
   </div>
 
   <h2 class="section-title">グラフ（横軸=最新からの相対時間[s], 縦軸=距離[mm]）</h2>
-  <canvas id="chart"></canvas>
+  <canvas id="chart" aria-label="距離グラフ" role="img"></canvas>
 
   <h2 class="section-title">受信ログ</h2>
-  <div id="log"></div>
+  <div id="log" aria-live="polite"></div>
 
   <script>
-    // ========== ユーティリティ（行単位に区切る） ==========
-    class LineBreakTransformer {
-      constructor() { this.container = ""; }
-      transform(chunk, controller) {
-        this.container += chunk;
-        const lines = this.container.split(/\r?\n/);
-        this.container = lines.pop();
-        for (const line of lines) controller.enqueue(line);
+    (() => {
+      'use strict';
+
+      // ---------------------------
+      // ユーティリティ（行単位に分割）
+      // ---------------------------
+      class LineBreakTransformer {
+        constructor() { this.container = ""; }
+        transform(chunk, controller) {
+          this.container += chunk;
+          const lines = this.container.split(/\r?\n/);
+          this.container = lines.pop();
+          for (const line of lines) controller.enqueue(line);
+        }
+        flush(controller) {
+          if (this.container) controller.enqueue(this.container);
+        }
       }
-      flush(controller) {
-        if (this.container) controller.enqueue(this.container);
+
+      // ---------------------------
+      // 要素
+      // ---------------------------
+      const els = {
+        connectBtn: document.getElementById('connectBtn'),
+        disconnectBtn: document.getElementById('disconnectBtn'),
+        baudSel: document.getElementById('baud'),
+        autoScrollChk: document.getElementById('autoScroll'),
+        saveCsvBtn: document.getElementById('saveCsvBtn'),
+        clearBtn: document.getElementById('clearBtn'),
+
+        timeWindowSecInput: document.getElementById('timeWindowSec'),
+        yMinInput: document.getElementById('yMin'),
+        yMaxInput: document.getElementById('yMax'),
+        applyAxisBtn: document.getElementById('applyAxisBtn'),
+        resetAxisBtn: document.getElementById('resetAxisBtn'),
+
+        statusEl: document.getElementById('status'),
+        portInfoEl: document.getElementById('portInfo'),
+        latestValEl: document.getElementById('latestVal'),
+        latestTimeEl: document.getElementById('latestTime'),
+        timeoutCountEl: document.getElementById('timeoutCount'),
+        sampleCountEl: document.getElementById('sampleCount'),
+        samplePeriodEl: document.getElementById('samplePeriod'),
+        logEl: document.getElementById('log'),
+        chartCanvas: document.getElementById('chart'),
+      };
+
+      // ---------------------------
+      // 状態
+      // ---------------------------
+      const state = {
+        port: null,
+        reader: null,
+        sampleCount: 0,
+        timeoutCount: 0,
+        prevMillisForPeriod: null,
+
+        // 受信データ（絶対ms & 距離）
+        timesMs: [],
+        dists: [],
+        lastMillis: null,
+
+        // 表示ウィンドウ（相対時間の幅）
+        windowMs: 10_000, // 10秒
+
+        // CSV
+        receiveCsv: [],
+      };
+
+      // ---------------------------
+      // ログ表示
+      // ---------------------------
+      function appendLog(line) {
+        els.logEl.textContent += line + "\n";
+        if (els.logEl.textContent.length > 200000) {
+          els.logEl.textContent = els.logEl.textContent.slice(-200000);
+        }
+        if (els.autoScrollChk.checked) els.logEl.scrollTop = els.logEl.scrollHeight;
       }
-    }
 
-    // ========== 要素取得 ==========
-    const connectBtn = document.getElementById('connectBtn');
-    const disconnectBtn = document.getElementById('disconnectBtn');
-    const baudSel = document.getElementById('baud');
-    const autoScrollChk = document.getElementById('autoScroll');
-    const saveCsvBtn = document.getElementById('saveCsvBtn');
-    const clearBtn = document.getElementById('clearBtn');
+      // ---------------------------
+      // 解析
+      // ---------------------------
+      function parseLine(line) {
+        // "<millis>,<distance>" or "<millis>,<distance> TIMEOUT"
+        const commaIdx = line.indexOf(',');
+        if (commaIdx < 0) return null;
 
-    const timeWindowSecInput = document.getElementById('timeWindowSec');
-    const yMinInput = document.getElementById('yMin');
-    const yMaxInput = document.getElementById('yMax');
-    const applyAxisBtn = document.getElementById('applyAxisBtn');
-    const resetAxisBtn = document.getElementById('resetAxisBtn');
+        const msStr = line.slice(0, commaIdx).trim();
+        const rest = line.slice(commaIdx + 1).trim();
 
-    const statusEl = document.getElementById('status');
-    const portInfoEl = document.getElementById('portInfo');
-    const latestValEl = document.getElementById('latestVal');
-    const latestTimeEl = document.getElementById('latestTime');
-    const timeoutCountEl = document.getElementById('timeoutCount');
-    const sampleCountEl = document.getElementById('sampleCount');
-    const samplePeriodEl = document.getElementById('samplePeriod');
-    const logEl = document.getElementById('log');
+        let isTimeout = false;
+        let distStr = rest;
+        const timeoutIdx = rest.indexOf('TIMEOUT');
+        if (timeoutIdx >= 0) {
+          isTimeout = true;
+          distStr = rest.slice(0, timeoutIdx).trim();
+        }
 
-    // ========== 状態 ==========
-    let port = null;
-    let reader = null;
-    let reading = false;
+        const millis = Number.parseInt(msStr, 10);
+        const distance = Number.parseInt(distStr, 10);
+        if (!Number.isFinite(millis) || !Number.isFinite(distance)) return null;
 
-    let timeoutCount = 0;
-    let sampleCount = 0;
+        return { millis, distance, isTimeout };
+      }
 
-    // 受信データ（絶対ミリ秒と距離）を保持
-    const timesMs = [];   // 絶対時間（ESP32のmillis）
-    const dists = [];     // 距離[mm]
-    let lastMillis = null;
-
-    // 表示ウィンドウ（相対時間の幅）
-    let windowMs = 10_000; // 既定10秒
-
-    // CSV 保存用
-    let receiveCsv = []; // [["millis","distance","timeout"], ...]
-
-    // ========== Chart.js 初期化 ==========
-    const chartCtx = document.getElementById('chart');
-    const chart = new Chart(chartCtx, {
-      type: 'line',
-      data: {
-        // 相対時間表示のため、labelsは使わず datasets[0].data に {x,y} を入れる
-        datasets: [{
-          label: '距離 [mm]',
-          data: [],
-          borderColor: '#1f77b4',
-          backgroundColor: 'rgba(31,119,180,0.1)',
-          pointRadius: 0,
-          tension: 0.15,
-        }]
-      },
-      options: {
-        animation: false,
-        responsive: true,
-        maintainAspectRatio: false,
-        parsing: false,            // {x,y} をそのまま使う
-        scales: {
-          x: {
-            type: 'linear',
-            title: { display: true, text: '相対時間 [s]' },
-            // 相対時間: 最新=0s, 過去=負の値
-            min: -windowMs,  // ms（内部はms、表示はticks callbackで秒化）
-            max: 0,
-            ticks: {
-              callback: (v) => (v/1000).toFixed(1), // 秒表示
-            },
-          },
-          y: {
-            title: { display: true, text: '距離 [mm]' },
-            // min/max は applyAxis() でユーザー指定に応じて設定
-          }
+      // ---------------------------
+      // Chart.js 初期化
+      // ---------------------------
+      const chart = new Chart(els.chartCanvas, {
+        type: 'line',
+        data: {
+          // 相対時間表示のため {x,y} を直接使う
+          datasets: [{
+            label: '距離 [mm]',
+            data: [],
+            borderColor: '#1f77b4',
+            backgroundColor: 'rgba(31,119,180,0.1)',
+            pointRadius: 0,
+            tension: 0.15,
+          }]
         },
-        plugins: {
-          legend: { display: true }
+        options: {
+          animation: false,
+          responsive: true,
+          maintainAspectRatio: false,
+          parsing: false,
+          scales: {
+            x: {
+              type: 'linear',
+              title: { display: true, text: '相対時間 [s]' },
+              min: -state.windowMs,  // 内部はms、表示は秒
+              max: 0,
+              ticks: { callback: (v) => (v/1000).toFixed(1) },
+            },
+            y: {
+              title: { display: true, text: '距離 [mm]' },
+              // min/max は applyAxis() で設定
+            }
+          },
+          plugins: { legend: { display: true } }
+        }
+      });
+
+      // ---------------------------
+      // データ更新 & グラフ更新
+      // ---------------------------
+      function pushData(millis, distance) {
+        state.timesMs.push(millis);
+        state.dists.push(distance);
+        state.lastMillis = millis;
+
+        // 古いデータを間引き（1.5倍の余裕）
+        const cutoff = millis - state.windowMs * 1.5;
+        while (state.timesMs.length && state.timesMs[0] < cutoff) {
+          state.timesMs.shift();
+          state.dists.shift();
         }
       }
-    });
 
-    function appendLog(line) {
-      logEl.textContent += line + "\n";
-      if (logEl.textContent.length > 200000) {
-        logEl.textContent = logEl.textContent.slice(-200000);
-      }
-      if (autoScrollChk.checked) logEl.scrollTop = logEl.scrollHeight;
-    }
-
-    function updateStats({ millis, distance, isTimeout }) {
-      latestValEl.textContent = (distance ?? "-");
-      latestTimeEl.textContent = (millis ?? "-");
-      sampleCountEl.textContent = sampleCount.toString();
-      timeoutCountEl.textContent = timeoutCount.toString();
-
-      // サンプリング周期（受信ミリ秒の差分から推定）
-      staticLastMillis = updateStats._lastMillis || null;
-      if (staticLastMillis != null && millis != null) {
-        const period = millis - staticLastMillis;
-        if (period > 0 && period < 100000) {
-          samplePeriodEl.textContent = `${period} ms (${(1000/period).toFixed(2)} Hz)`;
+      function refreshChart() {
+        if (state.lastMillis == null) return;
+        const data = [];
+        for (let i = 0; i < state.timesMs.length; i++) {
+          const rel = state.timesMs[i] - state.lastMillis; // 0（最新）〜 負（過去）
+          if (rel >= -state.windowMs) data.push({ x: rel, y: state.dists[i] });
         }
+        chart.data.datasets[0].data = data;
+        chart.options.scales.x.min = -state.windowMs;
+        chart.options.scales.x.max = 0;
+        chart.update('none');
       }
-      updateStats._lastMillis = millis;
 
-      statusEl.className = isTimeout ? 'warn' : 'ok';
-      statusEl.textContent = port ? '接続中' : '未接続';
-    }
+      // ---------------------------
+      // UI更新
+      // ---------------------------
+      function updateStats({ millis, distance, isTimeout }) {
+        els.latestValEl.textContent = (distance ?? "-");
+        els.latestTimeEl.textContent = (millis ?? "-");
 
-    // データバッファに追加 & 古いデータの間引き（時間窓に応じて）
-    function pushData(millis, distance) {
-      timesMs.push(millis);
-      dists.push(distance);
+        state.sampleCount++;
+        els.sampleCountEl.textContent = state.sampleCount.toString();
 
-      // 最新の絶対時刻を保持
-      lastMillis = millis;
-
-      // 表示窓より古いデータを削除（最大で窓の1.5倍の余裕）
-      const cutoff = millis - windowMs * 1.5;
-      while (timesMs.length > 0 && timesMs[0] < cutoff) {
-        timesMs.shift();
-        dists.shift();
-      }
-    }
-
-    // グラフのデータを再構成（絶対ms -> 相対msに変換）
-    function refreshChart() {
-      if (lastMillis == null) return;
-      const data = [];
-      for (let i = 0; i < timesMs.length; i++) {
-        const rel = timesMs[i] - lastMillis; // 0（最新）〜 マイナス（過去）
-        if (rel >= -windowMs) {
-          data.push({ x: rel, y: dists[i] });
+        if (isTimeout) {
+          state.timeoutCount++;
+          els.timeoutCountEl.textContent = state.timeoutCount.toString();
         }
-      }
-      chart.data.datasets[0].data = data;
-      chart.options.scales.x.min = -windowMs;
-      chart.options.scales.x.max = 0;
-      chart.update('none');
-    }
 
-    function parseLine(line) {
-      // "<millis>,<distance>" or "<millis>,<distance> TIMEOUT"
-      const commaIdx = line.indexOf(',');
-      if (commaIdx < 0) return null;
-
-      const msStr = line.slice(0, commaIdx).trim();
-      const rest = line.slice(commaIdx + 1).trim();
-
-      let isTimeout = false;
-      let distStr = rest;
-      const timeoutIdx = rest.indexOf('TIMEOUT');
-      if (timeoutIdx >= 0) {
-        isTimeout = true;
-        distStr = rest.slice(0, timeoutIdx).trim();
-      }
-
-      const millis = Number.parseInt(msStr, 10);
-      const distance = Number.parseInt(distStr, 10);
-      if (!Number.isFinite(millis) || !Number.isFinite(distance)) return null;
-
-      return { millis, distance, isTimeout };
-    }
-
-    async function readLoop() {
-      if (!port?.readable) return;
-
-      const textDecoder = new TextDecoderStream();
-      const lineStream = port.readable
-        .pipeThrough(textDecoder)
-        .pipeThrough(new TransformStream({
-          start() { this.lbt = new LineBreakTransformer(); },
-          transform(chunk, controller) { this.lbt.transform(chunk, controller); },
-          flush(controller) { this.lbt.flush(controller); }
-        }));
-
-      reader = lineStream.getReader();
-      reading = true;
-
-      try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          if (typeof value !== 'string') continue;
-
-          appendLog(value);
-
-          const parsed = parseLine(value);
-          if (!parsed) continue;
-
-          const { millis, distance, isTimeout } = parsed;
-          sampleCount++;
-          if (isTimeout) timeoutCount++;
-
-          // CSV バッファにも保存
-          receiveCsv.push([millis, distance, isTimeout ? 1 : 0]);
-
-          // データ追記＆再描画
-          pushData(millis, distance);
-          updateStats({ millis, distance, isTimeout });
-          refreshChart();
-        }
-      } catch (err) {
-        console.error(err);
-        appendLog(`[エラー] ${String(err)}`);
-      } finally {
-        reading = false;
-        try { await reader.releaseLock(); } catch {}
-      }
-    }
-
-    async function connect() {
-      if (!('serial' in navigator)) {
-        alert('このブラウザは Web Serial に対応していません。Chrome または Edge の最新版をお使いください。');
-        return;
-      }
-      try {
-        const p = await navigator.serial.requestPort(); // ユーザーが選択
-        const baudRate = Number.parseInt(baudSel.value, 10);
-        await p.open({ baudRate, dataBits: 8, stopBits: 1, parity: 'none', flowControl: 'none' });
-
-        port = p;
-        connectBtn.disabled = true;
-        disconnectBtn.disabled = false;
-        saveCsvBtn.disabled = false;
-
-        // ポート情報
-        let infoText = '-';
-        try {
-          const info = port.getInfo?.();
-          if (info && (info.usbVendorId || info.usbProductId)) {
-            const v = info.usbVendorId ? '0x' + info.usbVendorId.toString(16) : '?';
-            const d = info.usbProductId ? '0x' + info.usbProductId.toString(16) : '?';
-            infoText = `VID ${v} / PID ${d}`;
-          } else {
-            infoText = 'USB CDC / 不明';
+        if (state.prevMillisForPeriod != null && Number.isFinite(millis)) {
+          const period = millis - state.prevMillisForPeriod;
+          if (period > 0 && period < 100000) {
+            els.samplePeriodEl.textContent = `${period} ms (${(1000/period).toFixed(2)} Hz)`;
           }
-        } catch {}
-        portInfoEl.textContent = infoText;
+        }
+        state.prevMillisForPeriod = millis;
 
-        statusEl.textContent = '接続中';
-        statusEl.className = 'ok';
+        els.statusEl.className = isTimeout ? 'warn' : 'ok';
+        els.statusEl.textContent = state.port ? '接続中' : '未接続';
+      }
 
-        // 受信状態を初期化
-        timeoutCount = 0; sampleCount = 0; lastMillis = null;
-        timesMs.length = 0; dists.length = 0;
-        receiveCsv = [["millis","distance","timeout"]];
+      // ---------------------------
+      // 軸設定
+      // ---------------------------
+      function applyAxis() {
+        // 時間窓（秒）→ ms
+        const t = Number(els.timeWindowSecInput.value);
+        if (Number.isFinite(t) && t > 0) {
+          state.windowMs = Math.floor(t * 1000);
+        } else {
+          alert('時間ウィンドウは正の数値（秒）を入力してください');
+          return;
+        }
+
+        // Y軸 min/max
+        const yminStr = els.yMinInput.value.trim();
+        const ymaxStr = els.yMaxInput.value.trim();
+        const ymin = yminStr === '' ? undefined : Number(yminStr);
+        const ymax = ymaxStr === '' ? undefined : Number(ymaxStr);
+
+        if (ymin !== undefined && ymax !== undefined && ymin >= ymax) {
+          alert('縦軸の min は max より小さくしてください');
+          return;
+        }
+
+        chart.options.scales.x.min = -state.windowMs;
+        chart.options.scales.x.max = 0;
+        chart.options.scales.y.min = ymin;
+        chart.options.scales.y.max = ymax;
+
+        refreshChart();
+      }
+
+      function resetAxis() {
+        els.timeWindowSecInput.value = '10';
+        els.yMinInput.value = '';
+        els.yMaxInput.value = '';
+
+        state.windowMs = 10_000;
+        chart.options.scales.x.min = -state.windowMs;
+        chart.options.scales.x.max = 0;
+        chart.options.scales.y.min = undefined;
+        chart.options.scales.y.max = undefined;
+
+        refreshChart();
+      }
+
+      // ---------------------------
+      // シリアル
+      // ---------------------------
+      async function readLoop() {
+        if (!state.port?.readable) return;
+
+        const textDecoder = new TextDecoderStream();
+        const lineStream = state.port.readable
+          .pipeThrough(textDecoder)
+          .pipeThrough(new TransformStream({
+            start() { this.lbt = new LineBreakTransformer(); },
+            transform(chunk, controller) { this.lbt.transform(chunk, controller); },
+            flush(controller) { this.lbt.flush(controller); }
+          }));
+
+        const reader = lineStream.getReader();
+        state.reader = reader;
+
+        try {
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (typeof value !== 'string') continue;
+
+            appendLog(value);
+
+            const parsed = parseLine(value);
+            if (!parsed) continue;
+
+            const { millis, distance, isTimeout } = parsed;
+
+            // CSV
+            state.receiveCsv.push([millis, distance, isTimeout ? 1 : 0]);
+
+            // データ & UI
+            pushData(millis, distance);
+            updateStats({ millis, distance, isTimeout });
+            refreshChart();
+          }
+        } catch (err) {
+          console.error(err);
+          appendLog(`[エラー] ${String(err)}`);
+        } finally {
+          try { await reader.releaseLock(); } catch {}
+          state.reader = null;
+        }
+      }
+
+      async function connect() {
+        if (!('serial' in navigator)) {
+          alert('このブラウザは Web Serial に対応していません。Chrome または Edge の最新版をお使いください。');
+          return;
+        }
+        try {
+          const p = await navigator.serial.requestPort();
+          const baudRate = Number.parseInt(els.baudSel.value, 10);
+          await p.open({ baudRate, dataBits: 8, stopBits: 1, parity: 'none', flowControl: 'none' });
+
+          state.port = p;
+          els.connectBtn.disabled = true;
+          els.disconnectBtn.disabled = false;
+          els.saveCsvBtn.disabled = false;
+
+          // ポート情報
+          try {
+            const info = state.port.getInfo?.();
+            if (info && (info.usbVendorId || info.usbProductId)) {
+              const v = info.usbVendorId ? '0x' + info.usbVendorId.toString(16) : '?';
+              const d = info.usbProductId ? '0x' + info.usbProductId.toString(16) : '?';
+              els.portInfoEl.textContent = `VID ${v} / PID ${d}`;
+            } else {
+              els.portInfoEl.textContent = 'USB CDC / 不明';
+            }
+          } catch { els.portInfoEl.textContent = '-'; }
+
+          els.statusEl.textContent = '接続中';
+          els.statusEl.className = 'ok';
+
+          // 初期化
+          state.timeoutCount = 0;
+          state.sampleCount = 0;
+          state.prevMillisForPeriod = null;
+          state.lastMillis = null;
+          state.timesMs.length = 0;
+          state.dists.length = 0;
+          state.receiveCsv = [["millis","distance","timeout"]];
+          chart.data.datasets[0].data = [];
+          chart.update();
+
+          await readLoop();
+
+        } catch (err) {
+          console.error(err);
+          alert('接続に失敗しました: ' + String(err));
+          await disconnect(true);
+        }
+      }
+
+      async function disconnect(silent = false) {
+        els.disconnectBtn.disabled = true;
+        try {
+          if (state.reader) {
+            try { await state.reader.cancel(); } catch {}
+            try { await state.reader.releaseLock(); } catch {}
+            state.reader = null;
+          }
+          if (state.port?.readable) {
+            try { await state.port.readable.cancel(); } catch {}
+          }
+          if (state.port?.writable) {
+            try { await state.port.writable.abort?.(); } catch {}
+          }
+          if (state.port) {
+            try { await state.port.close(); } catch {}
+          }
+        } finally {
+          state.port = null;
+          els.connectBtn.disabled = false;
+          els.saveCsvBtn.disabled = state.receiveCsv.length <= 1;
+          els.statusEl.textContent = '未接続';
+          els.statusEl.className = '';
+          if (!silent) appendLog('[切断]');
+        }
+      }
+
+      function saveCsv() {
+        if (state.receiveCsv.length <= 1) {
+          alert('保存するデータがありません。');
+          return;
+        }
+        const lines = state.receiveCsv.map(row => row.join(',')).join('\n');
+        const blob = new Blob([lines], { type: 'text/csv;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const dateStr = new Date().toISOString().replace(/[:.]/g, '-');
+        a.href = url;
+        a.download = `tof_serial_${dateStr}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+
+      function clearView() {
+        els.logEl.textContent = '';
+        els.latestValEl.textContent = '-';
+        els.latestTimeEl.textContent = '-';
+        state.timeoutCount = 0; els.timeoutCountEl.textContent = '0';
+        state.sampleCount = 0; els.sampleCountEl.textContent = '0';
+        els.samplePeriodEl.textContent = '-';
+
+        state.timesMs.length = 0;
+        state.dists.length = 0;
+        state.lastMillis = null;
+        state.prevMillisForPeriod = null;
+
         chart.data.datasets[0].data = [];
         chart.update();
-
-        await readLoop();
-
-      } catch (err) {
-        console.error(err);
-        alert('接続に失敗しました: ' + String(err));
-        await disconnect(true);
-      }
-    }
-
-    async function disconnect(silent = false) {
-      disconnectBtn.disabled = true;
-      try {
-        if (reader) {
-          try { await reader.cancel(); } catch {}
-          try { await reader.releaseLock(); } catch {}
-        }
-        if (port?.readable) {
-          try { await port.readable.cancel(); } catch {}
-        }
-        if (port?.writable) {
-          try { await port.writable.abort?.(); } catch {}
-        }
-        if (port) {
-          try { await port.close(); } catch {}
-        }
-      } finally {
-        port = null;
-        reader = null;
-        reading = false;
-        connectBtn.disabled = false;
-        saveCsvBtn.disabled = receiveCsv.length <= 1;
-        statusEl.textContent = '未接続';
-        statusEl.className = '';
-        if (!silent) appendLog('[切断]');
-      }
-    }
-
-    function saveCsv() {
-      if (receiveCsv.length <= 1) {
-        alert('保存するデータがありません。');
-        return;
-      }
-      const lines = receiveCsv.map(row => row.join(',')).join('\n');
-      const blob = new Blob([lines], { type: 'text/csv;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      const dateStr = new Date().toISOString().replace(/[:.]/g, '-');
-      a.href = url;
-      a.download = `tof_serial_${dateStr}.csv`;
-      a.click();
-      URL.revokeObjectURL(url);
-    }
-
-    function clearView() {
-      logEl.textContent = '';
-      latestValEl.textContent = '-';
-      latestTimeEl.textContent = '-';
-      timeoutCount = 0; timeoutCountEl.textContent = '0';
-      sampleCount = 0; sampleCountEl.textContent = '0';
-      samplePeriodEl.textContent = '-';
-
-      timesMs.length = 0;
-      dists.length = 0;
-      lastMillis = null;
-
-      chart.data.datasets[0].data = [];
-      chart.update();
-    }
-
-    // 軸の適用／リセット
-    function applyAxis() {
-      // 時間窓（秒）→ ms
-      const t = Number(timeWindowSecInput.value);
-      if (Number.isFinite(t) && t > 0) {
-        windowMs = Math.floor(t * 1000);
-      } else {
-        alert('時間ウィンドウは正の数値（秒）を入力してください');
-        return;
       }
 
-      // Y軸 min/max
-      const yminStr = yMinInput.value.trim();
-      const ymaxStr = yMaxInput.value.trim();
-      const ymin = yminStr === '' ? undefined : Number(yminStr);
-      const ymax = ymaxStr === '' ? undefined : Number(ymaxStr);
+      // ---------------------------
+      // イベント・初期化
+      // ---------------------------
+      navigator.serial?.addEventListener('connect', () => appendLog('[デバイスが接続されました]'));
+      navigator.serial?.addEventListener('disconnect', () => appendLog('[デバイスが取り外されました]'));
 
-      if (ymin !== undefined && ymax !== undefined && ymin >= ymax) {
-        alert('縦軸の min は max より小さくしてください');
-        return;
-      }
-
-      chart.options.scales.x.min = -windowMs;
-      chart.options.scales.x.max = 0;
-      chart.options.scales.y.min = ymin;
-      chart.options.scales.y.max = ymax;
-
-      refreshChart();
-    }
-
-    function resetAxis() {
-      timeWindowSecInput.value = '10';
-      yMinInput.value = '';
-      yMaxInput.value = '';
-
-      windowMs = 10_000;
-      chart.options.scales.x.min = -windowMs;
-      chart.options.scales.x.max = 0;
-      chart.options.scales.y.min = undefined;
-      chart.options.scales.y.max = undefined;
-
-      refreshChart();
-    }
-
-    // シリアルの自動イベント
-    navigator.serial?.addEventListener('connect', (event) => {
-      appendLog('[デバイスが接続されました]');
-    });
-    navigator.serial?.addEventListener('disconnect', async (event) => {
-      appendLog('[デバイスが取り外されました]');
-      await disconnect(true);
-    });
-
-    // イベントバインド
-    connectBtn.addEventListener('click', connect);
-    disconnectBtn.addEventListener('click', () => disconnect(false));
-    saveCsvBtn.addEventListener('click', saveCsv);
-    clearBtn.addEventListener('click', clearView);
-    applyAxisBtn.addEventListener('click', applyAxis);
-    resetAxisBtn.addEventListener('click', resetAxis);
-
-    // 初期適用
-    applyAxis();
-  </script>
-</body>
-</html>
-``
+      els.connectBtn.addEventListener('click', connect);
+      els.disconnectBtn.addEventListener('click', () => disconnect(false));
+      els.saveCsvBtn.addEventListener('click', saveCsv);
+      els.clearBtn.addEventListener('click', clearView);
