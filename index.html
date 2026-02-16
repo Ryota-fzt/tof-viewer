@@ -2,10 +2,10 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
-  <title>ToF シリアルビューア (Web Serial)</title>
+  <title>ToF シリアルビューア（相対時間軸 & 任意Y軸）</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <!-- Chart.js for simple line chart -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- Chart.js (v4系) -->
+  https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     :root { color-scheme: light dark; }
     body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP", sans-serif; margin: 24px; }
@@ -13,19 +13,22 @@
     .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 12px; }
     .row label { font-size: 0.9rem; }
     button { padding: 8px 14px; font-size: 0.95rem; }
+    input[type="number"] { padding: 6px; font-size: 0.95rem; }
     .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-top: 10px; }
     .card { border: 1px solid #9993; border-radius: 8px; padding: 10px; }
     .val { font-size: 1.4rem; font-weight: 600; }
     #log { height: 160px; overflow: auto; white-space: pre; background: #0000000a; padding: 8px; border-radius: 8px; border: 1px solid #9993; }
-    canvas { max-height: 360px; }
+    #chart { max-height: 380px; }
     .ok { color: #1a7f37; }
     .warn { color: #b44; }
     .muted { opacity: 0.7; }
+    .section-title { margin-top: 16px; margin-bottom: 6px; }
   </style>
 </head>
 <body>
-  <h1>ToF シリアルビューア（Chrome/Edge × Web Serial）</h1>
+  <h1>ToF シリアルビューア（相対時間軸 & 任意Y軸）</h1>
 
+  <!-- 操作パネル -->
   <div class="row">
     <button id="connectBtn">接続</button>
     <button id="disconnectBtn" disabled>切断</button>
@@ -44,6 +47,31 @@
     <button id="clearBtn">表示クリア</button>
   </div>
 
+  <!-- 軸の設定 -->
+  <h2 class="section-title">軸の設定</h2>
+  <div class="row" style="gap:16px; align-items:flex-end;">
+    <div>
+      <div class="muted">横軸：表示時間幅（相対時間・秒）</div>
+      <label>ウィンドウ幅[s]:
+        <input id="timeWindowSec" type="number" min="1" step="1" value="10" style="width:120px" />
+      </label>
+    </div>
+    <div>
+      <div class="muted">縦軸：距離[mm]（空欄＝自動）</div>
+      <label>min:
+        <input id="yMin" type="number" placeholder="自動" style="width:110px" />
+      </label>
+      <label>max:
+        <input id="yMax" type="number" placeholder="自動" style="width:110px" />
+      </label>
+    </div>
+    <div>
+      <button id="applyAxisBtn">適用</button>
+      <button id="resetAxisBtn">リセット（自動）</button>
+    </div>
+  </div>
+
+  <!-- 統計 -->
   <div class="stats">
     <div class="card"><div class="muted">接続状態</div><div id="status" class="val">未接続</div></div>
     <div class="card"><div class="muted">ポート情報</div><div id="portInfo" class="val">-</div></div>
@@ -54,14 +82,14 @@
     <div class="card"><div class="muted">推定サンプリング周期</div><div id="samplePeriod" class="val">-</div></div>
   </div>
 
-  <h2>グラフ</h2>
+  <h2 class="section-title">グラフ（横軸=最新からの相対時間[s], 縦軸=距離[mm]）</h2>
   <canvas id="chart"></canvas>
 
-  <h2>受信ログ</h2>
+  <h2 class="section-title">受信ログ</h2>
   <div id="log"></div>
 
   <script>
-    // --- Utility: line-by-line transformer for streams ---
+    // ========== ユーティリティ（行単位に区切る） ==========
     class LineBreakTransformer {
       constructor() { this.container = ""; }
       transform(chunk, controller) {
@@ -75,13 +103,19 @@
       }
     }
 
-    // --- UI elements ---
+    // ========== 要素取得 ==========
     const connectBtn = document.getElementById('connectBtn');
     const disconnectBtn = document.getElementById('disconnectBtn');
-    const saveCsvBtn = document.getElementById('saveCsvBtn');
-    const clearBtn = document.getElementById('clearBtn');
     const baudSel = document.getElementById('baud');
     const autoScrollChk = document.getElementById('autoScroll');
+    const saveCsvBtn = document.getElementById('saveCsvBtn');
+    const clearBtn = document.getElementById('clearBtn');
+
+    const timeWindowSecInput = document.getElementById('timeWindowSec');
+    const yMinInput = document.getElementById('yMin');
+    const yMaxInput = document.getElementById('yMax');
+    const applyAxisBtn = document.getElementById('applyAxisBtn');
+    const resetAxisBtn = document.getElementById('resetAxisBtn');
 
     const statusEl = document.getElementById('status');
     const portInfoEl = document.getElementById('portInfo');
@@ -92,21 +126,31 @@
     const samplePeriodEl = document.getElementById('samplePeriod');
     const logEl = document.getElementById('log');
 
-    // --- State ---
+    // ========== 状態 ==========
     let port = null;
     let reader = null;
     let reading = false;
-    let receiveCsv = [];     // [["millis","distance","timeout"], ...]
+
     let timeoutCount = 0;
     let sampleCount = 0;
+
+    // 受信データ（絶対ミリ秒と距離）を保持
+    const timesMs = [];   // 絶対時間（ESP32のmillis）
+    const dists = [];     // 距離[mm]
     let lastMillis = null;
 
-    // --- Chart setup ---
-    const ctx = document.getElementById('chart');
-    const chart = new Chart(ctx, {
+    // 表示ウィンドウ（相対時間の幅）
+    let windowMs = 10_000; // 既定10秒
+
+    // CSV 保存用
+    let receiveCsv = []; // [["millis","distance","timeout"], ...]
+
+    // ========== Chart.js 初期化 ==========
+    const chartCtx = document.getElementById('chart');
+    const chart = new Chart(chartCtx, {
       type: 'line',
       data: {
-        labels: [],
+        // 相対時間表示のため、labelsは使わず datasets[0].data に {x,y} を入れる
         datasets: [{
           label: '距離 [mm]',
           data: [],
@@ -120,9 +164,22 @@
         animation: false,
         responsive: true,
         maintainAspectRatio: false,
+        parsing: false,            // {x,y} をそのまま使う
         scales: {
-          x: { title: { display: true, text: '時間 [ms]' } },
-          y: { title: { display: true, text: '距離 [mm]' } }
+          x: {
+            type: 'linear',
+            title: { display: true, text: '相対時間 [s]' },
+            // 相対時間: 最新=0s, 過去=負の値
+            min: -windowMs,  // ms（内部はms、表示はticks callbackで秒化）
+            max: 0,
+            ticks: {
+              callback: (v) => (v/1000).toFixed(1), // 秒表示
+            },
+          },
+          y: {
+            title: { display: true, text: '距離 [mm]' },
+            // min/max は applyAxis() でユーザー指定に応じて設定
+          }
         },
         plugins: {
           legend: { display: true }
@@ -144,33 +201,54 @@
       sampleCountEl.textContent = sampleCount.toString();
       timeoutCountEl.textContent = timeoutCount.toString();
 
-      if (lastMillis != null && millis != null) {
-        const period = millis - lastMillis; // ms
+      // サンプリング周期（受信ミリ秒の差分から推定）
+      staticLastMillis = updateStats._lastMillis || null;
+      if (staticLastMillis != null && millis != null) {
+        const period = millis - staticLastMillis;
         if (period > 0 && period < 100000) {
           samplePeriodEl.textContent = `${period} ms (${(1000/period).toFixed(2)} Hz)`;
         }
       }
-      if (millis != null) lastMillis = millis;
+      updateStats._lastMillis = millis;
 
       statusEl.className = isTimeout ? 'warn' : 'ok';
       statusEl.textContent = port ? '接続中' : '未接続';
     }
 
-    function addToChart(millis, distance) {
-      const MAX_POINTS = 2000; // limit for performance
-      const labels = chart.data.labels;
-      const data = chart.data.datasets[0].data;
-      labels.push(millis);
-      data.push(distance);
-      if (labels.length > MAX_POINTS) {
-        labels.splice(0, labels.length - MAX_POINTS);
-        data.splice(0, data.length - MAX_POINTS);
+    // データバッファに追加 & 古いデータの間引き（時間窓に応じて）
+    function pushData(millis, distance) {
+      timesMs.push(millis);
+      dists.push(distance);
+
+      // 最新の絶対時刻を保持
+      lastMillis = millis;
+
+      // 表示窓より古いデータを削除（最大で窓の1.5倍の余裕）
+      const cutoff = millis - windowMs * 1.5;
+      while (timesMs.length > 0 && timesMs[0] < cutoff) {
+        timesMs.shift();
+        dists.shift();
       }
-      chart.update('none'); // no animation
+    }
+
+    // グラフのデータを再構成（絶対ms -> 相対msに変換）
+    function refreshChart() {
+      if (lastMillis == null) return;
+      const data = [];
+      for (let i = 0; i < timesMs.length; i++) {
+        const rel = timesMs[i] - lastMillis; // 0（最新）〜 マイナス（過去）
+        if (rel >= -windowMs) {
+          data.push({ x: rel, y: dists[i] });
+        }
+      }
+      chart.data.datasets[0].data = data;
+      chart.options.scales.x.min = -windowMs;
+      chart.options.scales.x.max = 0;
+      chart.update('none');
     }
 
     function parseLine(line) {
-      // Expected: "<millis>,<distance>" or "<millis>,<distance> TIMEOUT"
+      // "<millis>,<distance>" or "<millis>,<distance> TIMEOUT"
       const commaIdx = line.indexOf(',');
       if (commaIdx < 0) return null;
 
@@ -222,10 +300,13 @@
           sampleCount++;
           if (isTimeout) timeoutCount++;
 
+          // CSV バッファにも保存
           receiveCsv.push([millis, distance, isTimeout ? 1 : 0]);
 
+          // データ追記＆再描画
+          pushData(millis, distance);
           updateStats({ millis, distance, isTimeout });
-          addToChart(millis, distance);
+          refreshChart();
         }
       } catch (err) {
         console.error(err);
@@ -251,6 +332,7 @@
         disconnectBtn.disabled = false;
         saveCsvBtn.disabled = false;
 
+        // ポート情報
         let infoText = '-';
         try {
           const info = port.getInfo?.();
@@ -267,10 +349,11 @@
         statusEl.textContent = '接続中';
         statusEl.className = 'ok';
 
+        // 受信状態を初期化
         timeoutCount = 0; sampleCount = 0; lastMillis = null;
+        timesMs.length = 0; dists.length = 0;
         receiveCsv = [["millis","distance","timeout"]];
-        chart.data.labels.length = 0;
-        chart.data.datasets[0].data.length = 0;
+        chart.data.datasets[0].data = [];
         chart.update();
 
         await readLoop();
@@ -333,11 +416,60 @@
       timeoutCount = 0; timeoutCountEl.textContent = '0';
       sampleCount = 0; sampleCountEl.textContent = '0';
       samplePeriodEl.textContent = '-';
-      chart.data.labels.length = 0;
-      chart.data.datasets[0].data.length = 0;
+
+      timesMs.length = 0;
+      dists.length = 0;
+      lastMillis = null;
+
+      chart.data.datasets[0].data = [];
       chart.update();
     }
 
+    // 軸の適用／リセット
+    function applyAxis() {
+      // 時間窓（秒）→ ms
+      const t = Number(timeWindowSecInput.value);
+      if (Number.isFinite(t) && t > 0) {
+        windowMs = Math.floor(t * 1000);
+      } else {
+        alert('時間ウィンドウは正の数値（秒）を入力してください');
+        return;
+      }
+
+      // Y軸 min/max
+      const yminStr = yMinInput.value.trim();
+      const ymaxStr = yMaxInput.value.trim();
+      const ymin = yminStr === '' ? undefined : Number(yminStr);
+      const ymax = ymaxStr === '' ? undefined : Number(ymaxStr);
+
+      if (ymin !== undefined && ymax !== undefined && ymin >= ymax) {
+        alert('縦軸の min は max より小さくしてください');
+        return;
+      }
+
+      chart.options.scales.x.min = -windowMs;
+      chart.options.scales.x.max = 0;
+      chart.options.scales.y.min = ymin;
+      chart.options.scales.y.max = ymax;
+
+      refreshChart();
+    }
+
+    function resetAxis() {
+      timeWindowSecInput.value = '10';
+      yMinInput.value = '';
+      yMaxInput.value = '';
+
+      windowMs = 10_000;
+      chart.options.scales.x.min = -windowMs;
+      chart.options.scales.x.max = 0;
+      chart.options.scales.y.min = undefined;
+      chart.options.scales.y.max = undefined;
+
+      refreshChart();
+    }
+
+    // シリアルの自動イベント
     navigator.serial?.addEventListener('connect', (event) => {
       appendLog('[デバイスが接続されました]');
     });
@@ -346,10 +478,17 @@
       await disconnect(true);
     });
 
+    // イベントバインド
     connectBtn.addEventListener('click', connect);
     disconnectBtn.addEventListener('click', () => disconnect(false));
     saveCsvBtn.addEventListener('click', saveCsv);
     clearBtn.addEventListener('click', clearView);
+    applyAxisBtn.addEventListener('click', applyAxis);
+    resetAxisBtn.addEventListener('click', resetAxis);
+
+    // 初期適用
+    applyAxis();
   </script>
 </body>
 </html>
+``
