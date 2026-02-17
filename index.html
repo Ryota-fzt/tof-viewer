@@ -110,27 +110,29 @@
       }
 
       // ---- 行ごとに分割するトランスフォーマ ----
-      class LineBreakTransformer {
-        constructor() { this.container = ""; }
-        transform(chunk, controller) {
-          // 1) まず「文字としての \r\n / \r / \n」を本物に直す
-          //    "\\r\\n" → "\n"、"\\r" → "\n"、"\\n" → "\n"
-          const normalized = chunk
-            .replace(/\\r\\n/g, '\n')
-            .replace(/\\r/g, '\n')
-            .replace(/\\n/g, '\n');
-      
-          // 2) コンテナに追加して、\r?\n（実際の改行コード）で分割
-          this.container += normalized;
-          const lines = this.container.split(/\r?\n|\r/);
-          this.container = lines.pop();
-          for (const line of lines) controller.enqueue(line);
-        }
-        flush(controller) {
-          if (this.container) controller.enqueue(this.container);
-        }
-      }
+<script>
+  class LineBreakTransformer {
+    constructor() { this.container = ""; }
+    transform(chunk, controller) {
+      // 文字として送られてきた "\r\n" / "\r" / "\n" を本物の改行に正規化
+      // まず replaceAll を使い、未対応環境では replace の非正規表現置換にフォールバック
+      let text = chunk;
+      const replAll = (s, from, to) => (s.replaceAll ? s.replaceAll(from, to) : s.split(from).join(to));
+      text = replAll(text, '\\r\\n', '\n');
+      text = replAll(text, '\\r',   '\n');
+      text = replAll(text, '\\n',   '\n');
 
+      // その後、実際の改行コード（\r\n / \n / \r）で行分割
+      this.container += text;
+      const lines = this.container.split(/\r\n|\n|\r/); // ← シンプルなパターンに統一
+      this.container = lines.pop();
+      for (const line of lines) controller.enqueue(line);
+    }
+    flush(controller) {
+      if (this.container) controller.enqueue(this.container);
+    }
+  }
+</script>
       // ---- DOM要素 ----
       const els = {
         connectBtn: document.getElementById('connectBtn'),
@@ -170,20 +172,25 @@
       };
 
       // ---- ログ ----
-     
-      function appendLog(line) {
-        // 文字の \r\n / \r / \n を実際の改行へ
-        const normalized = line
-          .replace(/\\r\\n/g, '\n')
-          .replace(/\\r/g, '\n')
-          .replace(/\\n/g, '\n');
-        logEl.textContent += normalized + '\n';
-        if (logEl.textContent.length > 200000) {
-          logEl.textContent = logEl.textContent.slice(-200000);
-        }
-        if (autoScrollChk.checked) logEl.scrollTop = logEl.scrollHeight;
-      }
+<script>
+  function appendLog(line) {
+    // 文字としての改行表現を本物の改行に統一
+    const replAll = (s, from, to) => (s.replaceAll ? s.replaceAll(from, to) : s.split(from).join(to));
+    let normalized = line;
+    normalized = replAll(normalized, '\\r\\n', '\n');
+    normalized = replAll(normalized, '\\r',   '\n');
+    normalized = replAll(normalized, '\\n',   '\n');
 
+    const maxLen = 200000;
+    logEl.textContent += normalized + '\n';
+    if (logEl.textContent.length > maxLen) {
+      logEl.textContent = logEl.textContent.slice(-maxLen);
+    }
+    if (autoScrollChk.checked) logEl.scrollTop = logEl.scrollHeight;
+  }
+</script>
+
+  
       // ---- 1行のパース ----
       function parseLine(line) {
         const commaIdx = line.indexOf(',');
@@ -483,4 +490,5 @@ console.debug('TAIL:', JSON.stringify(tail), codes);
   </script>
 </body>
 </html>
+
 
